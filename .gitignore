@@ -1,0 +1,21 @@
+# Go
+*.exe
+*.test
+*.out
+/vendor/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
