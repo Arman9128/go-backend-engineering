@@ -12,13 +12,27 @@ func main() {
 	taskStorage := storage.NewMemoryStorage()
 	taskService := task.NewService("Task Platform API", taskStorage)
 
-	if err := taskService.SubmitTask("send-email"); err != nil {
+	createdTask, err := taskService.SubmitTask("send-email")
+	if err != nil {
 		fmt.Println("Application error:", err)
 		os.Exit(1)
 	}
 
-	if err := taskService.SubmitTask("generate-report"); err != nil {
+	fmt.Printf("Created task: ID=%d, Name=%s, Status=%s\n",
+		createdTask.ID,
+		createdTask.Name,
+		createdTask.Status,
+	)
+
+	createdTask, err = taskService.SubmitTask("generate-report")
+	if err != nil {
 		fmt.Println("Application error:", err)
 		os.Exit(1)
 	}
+
+	fmt.Printf("Created task: ID=%d, Name=%s, Status=%s\n",
+		createdTask.ID,
+		createdTask.Name,
+		createdTask.Status,
+	)
 }

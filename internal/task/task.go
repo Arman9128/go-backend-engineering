@@ -1,9 +1,12 @@
 package task
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type Storage interface {
-	Save(taskName string) error
+	Save(task *Task) error
 }
 
 type Service struct {
@@ -18,16 +21,22 @@ func NewService(name string, storage Storage) *Service {
 	}
 }
 
-func (s *Service) SubmitTask(taskName string) error {
+func (s *Service) SubmitTask(taskName string) (*Task, error) {
 	if taskName == "" {
-		return fmt.Errorf("task name cannot be empty")
+		return nil, fmt.Errorf("task name cannot be empty")
 	}
 
-	if err := s.storage.Save(taskName); err != nil {
-		return fmt.Errorf("submit task %q: %w", taskName, err)
+	newTask := &Task{
+		Name:      taskName,
+		Status:    StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := s.storage.Save(newTask); err != nil {
+		return nil, fmt.Errorf("submit task %q: %w", taskName, err)
 	}
 
 	fmt.Println("Task submitted:", taskName)
 
-	return nil
+	return newTask, nil
 }
