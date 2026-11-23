@@ -2,23 +2,35 @@ package storage
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/Arman9128/go-backend-engineering/internal/task"
 )
 
 type MemoryStorage struct {
+	mu     sync.RWMutex
+	tasks  map[int64]*task.Task
 	nextID int64
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
+		tasks:  make(map[int64]*task.Task),
 		nextID: 1,
 	}
 }
 
 func (m *MemoryStorage) Save(taskData *task.Task) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	taskData.ID = m.nextID
 	m.nextID++
+
+	taskCopy := *taskData
+	taskCopy.Tags = make([]string, len(taskData.Tags))
+	copy(taskCopy.Tags, taskData.Tags)
+	m.tasks[taskData.ID] = &taskCopy
 
 	fmt.Printf(
 		"Task saved in memory: ID=%d, Name=%s, Status=%s\n",
@@ -28,4 +40,23 @@ func (m *MemoryStorage) Save(taskData *task.Task) error {
 	)
 
 	return nil
+}
+
+func (m *MemoryStorage) GetByID(id int64) (task.Task, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	taskData, exists := m.tasks[id]
+	if !exists {
+		return task.Task{}, fmt.Errorf("task with ID %d not found", id)
+	}
+
+	taskCopy := *taskData
+
+	if taskData.Tags != nil {
+		taskCopy.Tags = make([]string, len(taskData.Tags))
+		copy(taskCopy.Tags, taskData.Tags)
+	}
+
+	return taskCopy, nil
 }

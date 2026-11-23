@@ -7,6 +7,7 @@ type Task struct {
 	Name      string
 	Status    string
 	CreatedAt time.Time
+	Tags      []string
 }
 
 const (
