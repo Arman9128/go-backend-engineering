@@ -7,6 +7,7 @@ import (
 
 type Storage interface {
 	Save(task *Task) error
+	UpdateStatus(id int64, status string) error
 }
 
 type Service struct {
@@ -39,4 +40,16 @@ func (s *Service) SubmitTask(taskName string) (*Task, error) {
 	fmt.Println("Task submitted:", taskName)
 
 	return newTask, nil
+}
+
+func (s *Service) UpdateTaskStatus(id int64, status string) error {
+	if !IsValidStatus(status) {
+		return fmt.Errorf("update task status: invalid status %q", status)
+	}
+
+	if err := s.storage.UpdateStatus(id, status); err != nil {
+		return fmt.Errorf("update task %d status: %w", id, err)
+	}
+
+	return nil
 }

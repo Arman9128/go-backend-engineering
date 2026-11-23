@@ -6,9 +6,12 @@ import (
 )
 
 type mockStorage struct {
-	err       error
-	savedTask *Task
-	saveCalls int
+	err               error
+	savedTask         *Task
+	saveCalls         int
+	updateStatusCalls int
+	updatedTaskID     int64
+	updatedStatus     string
 }
 
 func (m *mockStorage) Save(task *Task) error {
@@ -22,6 +25,13 @@ func (m *mockStorage) Save(task *Task) error {
 	m.savedTask = task
 
 	return nil
+}
+
+func (m *mockStorage) UpdateStatus(id int64, status string) error {
+	m.updateStatusCalls++
+	m.updatedTaskID = id
+	m.updatedStatus = status
+	return m.err
 }
 
 func TestSubmitTask(t *testing.T) {
@@ -94,5 +104,52 @@ func TestSubmitTaskWithEmptyName(t *testing.T) {
 
 	if storage.saveCalls != 0 {
 		t.Errorf("expected storage not to be called, got %d calls", storage.saveCalls)
+	}
+}
+
+func TestUpdateTaskStatus(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+
+	err := service.UpdateTaskStatus(125, StatusProcessing)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if storage.updateStatusCalls != 1 {
+		t.Errorf("expected 1 update call, got %d", storage.updateStatusCalls)
+	}
+
+	if storage.updatedTaskID != 125 {
+		t.Errorf("expected task ID 125, got %d", storage.updatedTaskID)
+	}
+
+	if storage.updatedStatus != StatusProcessing {
+		t.Errorf("expected status %s, got %s", StatusProcessing, storage.updatedStatus)
+	}
+}
+
+func TestUpdateTaskStatusInvalidStatus(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+
+	err := service.UpdateTaskStatus(125, "unknown")
+	if err == nil {
+		t.Fatal("expected error for invalid status")
+	}
+
+	if storage.updateStatusCalls != 0 {
+		t.Errorf("expected storage not to be called, got %d calls", storage.updateStatusCalls)
+	}
+}
+
+func TestUpdateTaskStatusStorageError(t *testing.T) {
+	storageErr := errors.New("database unavailable")
+	storage := &mockStorage{err: storageErr}
+	service := NewService("Test API", storage)
+
+	err := service.UpdateTaskStatus(125, StatusProcessing)
+	if !errors.Is(err, storageErr) {
+		t.Errorf("expected wrapped storage error, got %v", err)
 	}
 }

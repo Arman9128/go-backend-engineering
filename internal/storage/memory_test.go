@@ -225,3 +225,68 @@ func TestGetByIDReturnsIndependentTags(t *testing.T) {
 		t.Errorf("expected email, got %s", storedTask.Tags[0])
 	}
 }
+
+func TestUpdateStatus(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	newTask := &task.Task{
+		Name:   "send-email",
+		Status: task.StatusPending,
+	}
+
+	if err := storage.Save(newTask); err != nil {
+		t.Fatalf("unexpected save error: %v", err)
+	}
+
+	if err := storage.UpdateStatus(newTask.ID, task.StatusProcessing); err != nil {
+		t.Fatalf("unexpected update error: %v", err)
+	}
+
+	updatedTask, err := storage.GetByID(newTask.ID)
+	if err != nil {
+		t.Fatalf("unexpected get error: %v", err)
+	}
+
+	if updatedTask.Status != task.StatusProcessing {
+		t.Errorf("expected status %s, got %s",
+			task.StatusProcessing, updatedTask.Status)
+	}
+}
+
+func TestUpdateStatusNotFound(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	err := storage.UpdateStatus(999, task.StatusProcessing)
+
+	if err == nil {
+		t.Fatal("expected error for missing task")
+	}
+}
+
+func TestUpdateStatusInvalidStatus(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	newTask := &task.Task{
+		Name:   "send-email",
+		Status: task.StatusPending,
+	}
+
+	if err := storage.Save(newTask); err != nil {
+		t.Fatalf("unexpected save error: %v", err)
+	}
+
+	err := storage.UpdateStatus(newTask.ID, "unknown")
+
+	if err == nil {
+		t.Fatal("expected error for invalid status")
+	}
+
+	storedTask, err := storage.GetByID(newTask.ID)
+	if err != nil {
+		t.Fatalf("unexpected get error: %v", err)
+	}
+
+	if storedTask.Status != task.StatusPending {
+		t.Errorf("expected status to remain pending, got %s", storedTask.Status)
+	}
+}

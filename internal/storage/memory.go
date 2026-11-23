@@ -60,3 +60,21 @@ func (m *MemoryStorage) GetByID(id int64) (task.Task, error) {
 
 	return taskCopy, nil
 }
+
+func (m *MemoryStorage) UpdateStatus(id int64, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	taskData, exists := m.tasks[id]
+	if !exists {
+		return fmt.Errorf("task with ID %d not found", id)
+	}
+
+	if !task.IsValidStatus(status) {
+		return fmt.Errorf("invalid task status: %s", status)
+	}
+
+	taskData.Status = status
+
+	return nil
+}
