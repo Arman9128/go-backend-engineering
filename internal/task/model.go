@@ -1,6 +1,14 @@
 package task
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var (
+	ErrNotFound      = errors.New("task not found")
+	ErrInvalidStatus = errors.New("invalid task status")
+)
 
 type Task struct {
 	ID        int64

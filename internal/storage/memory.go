@@ -48,7 +48,7 @@ func (m *MemoryStorage) GetByID(id int64) (task.Task, error) {
 
 	taskData, exists := m.tasks[id]
 	if !exists {
-		return task.Task{}, fmt.Errorf("task with ID %d not found", id)
+		return task.Task{}, fmt.Errorf("get task %d: %w", id, task.ErrNotFound)
 	}
 
 	taskCopy := *taskData
@@ -67,7 +67,7 @@ func (m *MemoryStorage) UpdateStatus(id int64, status string) error {
 
 	taskData, exists := m.tasks[id]
 	if !exists {
-		return fmt.Errorf("task with ID %d not found", id)
+		return fmt.Errorf("update task %d: %w", id, task.ErrNotFound)
 	}
 
 	if !task.IsValidStatus(status) {

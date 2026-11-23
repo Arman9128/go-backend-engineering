@@ -10,6 +10,9 @@ type mockStorage struct {
 	savedTask         *Task
 	saveCalls         int
 	updateStatusCalls int
+	getByIDCalls      int
+	requestedTaskID   int64
+	foundTask         Task
 	updatedTaskID     int64
 	updatedStatus     string
 }
@@ -25,6 +28,12 @@ func (m *mockStorage) Save(task *Task) error {
 	m.savedTask = task
 
 	return nil
+}
+
+func (m *mockStorage) GetByID(id int64) (Task, error) {
+	m.getByIDCalls++
+	m.requestedTaskID = id
+	return m.foundTask, m.err
 }
 
 func (m *mockStorage) UpdateStatus(id int64, status string) error {
@@ -151,5 +160,64 @@ func TestUpdateTaskStatusStorageError(t *testing.T) {
 	err := service.UpdateTaskStatus(125, StatusProcessing)
 	if !errors.Is(err, storageErr) {
 		t.Errorf("expected wrapped storage error, got %v", err)
+	}
+}
+
+func TestGetTaskByID(t *testing.T) {
+	expectedTask := Task{
+		ID:     125,
+		Name:   "send-email",
+		Status: StatusPending,
+	}
+
+	storage := &mockStorage{foundTask: expectedTask}
+	service := NewService("Test API", storage)
+
+	foundTask, err := service.GetTaskByID(125)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if foundTask.ID != expectedTask.ID {
+		t.Errorf("expected ID %d, got %d", expectedTask.ID, foundTask.ID)
+	}
+
+	if foundTask.Name != expectedTask.Name {
+		t.Errorf("expected name %s, got %s", expectedTask.Name, foundTask.Name)
+	}
+
+	if storage.getByIDCalls != 1 {
+		t.Errorf("expected 1 GetByID call, got %d", storage.getByIDCalls)
+	}
+
+	if storage.requestedTaskID != 125 {
+		t.Errorf("expected requested ID 125, got %d", storage.requestedTaskID)
+	}
+}
+
+func TestGetTaskByIDStorageError(t *testing.T) {
+	expectedErr := errors.New("database unavailable")
+	storage := &mockStorage{err: expectedErr}
+	service := NewService("Test API", storage)
+
+	_, err := service.GetTaskByID(125)
+
+	if !errors.Is(err, expectedErr) {
+		t.Errorf("expected wrapped storage error, got %v", err)
+	}
+}
+
+func TestGetTaskByIDInvalidID(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+
+	_, err := service.GetTaskByID(0)
+
+	if err == nil {
+		t.Fatal("expected error for invalid ID")
+	}
+
+	if storage.getByIDCalls != 0 {
+		t.Errorf("expected storage not to be called, got %d calls", storage.getByIDCalls)
 	}
 }
