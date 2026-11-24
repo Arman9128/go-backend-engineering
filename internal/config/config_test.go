@@ -95,3 +95,31 @@ func TestLoadCustomHTTPAddr(t *testing.T) {
 		t.Errorf("expected 127.0.0.1:9090, got %s", cfg.HTTPAddr)
 	}
 }
+
+func TestLoadDefaultRedisAddr(t *testing.T) {
+	setTestEnv(t)
+	t.Setenv("REDIS_ADDR", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.RedisAddr != "localhost:6379" {
+		t.Errorf("expected localhost:6379, got %s", cfg.RedisAddr)
+	}
+}
+
+func TestLoadCustomRedisAddr(t *testing.T) {
+	setTestEnv(t)
+	t.Setenv("REDIS_ADDR", "127.0.0.1:6380")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.RedisAddr != "127.0.0.1:6380" {
+		t.Errorf("expected 127.0.0.1:6380, got %s", cfg.RedisAddr)
+	}
+}

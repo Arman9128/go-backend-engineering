@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	HTTPAddr   string
+	RedisAddr  string
 	DBHost     string
 	DBPort     int
 	DBUser     string
@@ -31,12 +32,17 @@ func Load() (*Config, error) {
 	}
 
 	httpAddr := os.Getenv("HTTP_ADDR")
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
 	if httpAddr == "" {
 		httpAddr = ":8080"
 	}
 
 	cfg := &Config{
 		HTTPAddr:   httpAddr,
+		RedisAddr:  redisAddr,
 		DBHost:     os.Getenv("DB_HOST"),
 		DBPort:     port,
 		DBUser:     os.Getenv("DB_USER"),

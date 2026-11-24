@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Arman9128/go-backend-engineering/internal/task"
 )
@@ -28,22 +31,54 @@ func (s *PostgresStorage) Save(taskData *task.Task) error {
 		tags = []string{}
 	}
 
-	query := `
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("begin task transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var taskID int64
+	var createdAt time.Time
+
+	err = tx.QueryRow(`
 		INSERT INTO tasks (name, status, tags)
 		VALUES ($1, $2, $3)
 		RETURNING id, created_at
-	`
-
-	err := s.db.QueryRow(
-		query,
-		taskData.Name,
-		taskData.Status,
-		tags,
-	).Scan(&taskData.ID, &taskData.CreatedAt)
-
+	`, taskData.Name, taskData.Status, tags).Scan(
+		&taskID,
+		&createdAt,
+	)
 	if err != nil {
 		return fmt.Errorf("save task in PostgreSQL: %w", err)
 	}
+
+	payload, err := json.Marshal(map[string]any{
+		"id":         taskID,
+		"name":       taskData.Name,
+		"status":     taskData.Status,
+		"created_at": createdAt,
+		"tags":       tags,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal task event: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO outbox_events (
+			aggregate_type, aggregate_id, event_type, payload
+		)
+		VALUES ($1, $2, $3, $4)
+	`, "task", taskID, "task.created", string(payload))
+	if err != nil {
+		return fmt.Errorf("save task event in outbox: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit task transaction: %w", err)
+	}
+
+	taskData.ID = taskID
+	taskData.CreatedAt = createdAt
 
 	return nil
 }

@@ -107,3 +107,91 @@ func TestPostgresStorageSaveAndUpdateStatus(t *testing.T) {
 		t.Errorf("expected status %q, got %q", task.StatusCompleted, updatedStatus)
 	}
 }
+
+func TestPostgresStorageSaveRollsBackWhenOutboxInsertFails(t *testing.T) {
+	if os.Getenv("POSTGRES_INTEGRATION") != "1" {
+		t.Skip("PostgreSQL integration test is disabled")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	db, err := database.NewPostgresDB(cfg)
+	if err != nil {
+		t.Fatalf("connect to PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	_, err = db.ExecContext(ctx, `
+                CREATE OR REPLACE FUNCTION test_fail_outbox_insert()
+                RETURNS trigger AS $$
+                BEGIN
+                        RAISE EXCEPTION 'forced outbox insert failure';
+                END;
+                $$ LANGUAGE plpgsql
+        `)
+	if err != nil {
+		t.Fatalf("create test trigger function: %v", err)
+	}
+
+	defer func() {
+		_, err := db.ExecContext(ctx,
+			"DROP FUNCTION IF EXISTS test_fail_outbox_insert()")
+		if err != nil {
+			t.Errorf("drop test trigger function: %v", err)
+		}
+	}()
+
+	_, err = db.ExecContext(ctx, `
+                CREATE TRIGGER test_fail_outbox_insert_trigger
+                BEFORE INSERT ON outbox_events
+                FOR EACH ROW
+                EXECUTE FUNCTION test_fail_outbox_insert()
+        `)
+	if err != nil {
+		t.Fatalf("create test trigger: %v", err)
+	}
+
+	defer func() {
+		_, err := db.ExecContext(ctx, `
+                        DROP TRIGGER IF EXISTS test_fail_outbox_insert_trigger
+                        ON outbox_events
+                `)
+		if err != nil {
+			t.Errorf("drop test trigger: %v", err)
+		}
+	}()
+
+	taskData := &task.Task{
+		Name:   "rollback-integration-test",
+		Status: task.StatusPending,
+		Tags:   []string{"rollback"},
+	}
+
+	storage := NewPostgresStorage(db)
+
+	err = storage.Save(taskData)
+	if err == nil {
+		t.Fatal("expected Save to fail when outbox insert fails")
+	}
+
+	var count int
+
+	err = db.QueryRowContext(ctx, `
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE name = $1
+        `, taskData.Name).Scan(&count)
+
+	if err != nil {
+		t.Fatalf("query task after rollback: %v", err)
+	}
+
+	if count != 0 {
+		t.Errorf("expected task to be rolled back, found %d records", count)
+	}
+}
