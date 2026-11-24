@@ -76,12 +76,13 @@ func run() error {
 
 	publisher := outbox.NewPublisher(db, redisClient, "tasks:events")
 	taskProcessor := worker.NewTaskProcessor(taskService)
-	taskWorker := worker.NewWorker(
+	taskPool := worker.NewPool(
 		redisClient,
 		taskProcessor,
 		"tasks:events",
 		"task-workers",
-		"worker-1",
+		"worker",
+		cfg.WorkerCount,
 	)
 
 	publisherDone := make(chan struct{})
@@ -93,8 +94,8 @@ func run() error {
 	}()
 
 	go func() {
-		log.Println("Task worker starting")
-		workerDone <- taskWorker.Run(workerCtx)
+		log.Printf("Task worker pool starting: workers=%d", cfg.WorkerCount)
+		workerDone <- taskPool.Run(workerCtx)
 	}()
 
 	serverErrors := make(chan error, 1)
@@ -104,48 +105,97 @@ func run() error {
 		serverErrors <- server.ListenAndServe()
 	}()
 
-	select {
-	case err := <-serverErrors:
-		cancelWorker()
-		<-publisherDone
-		<-workerDone
+	var serverErr error
+	serverFinished := false
+	var workerErr error
+	workerFinished := false
 
-		if !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("HTTP server: %w", err)
+	select {
+	case serverErr = <-serverErrors:
+		serverFinished = true
+		stop()
+
+	case workerErr = <-workerDone:
+		workerFinished = true
+
+		if ctx.Err() == nil {
+			if workerErr == nil {
+				workerErr = errors.New("worker pool stopped unexpectedly")
+			}
+
+			log.Printf("Task worker pool stopped unexpectedly: %v", workerErr)
+			stop()
 		}
 
 	case <-ctx.Done():
 		log.Println("Shutdown signal received")
+	}
 
-		shutdownCtx, cancel := context.WithTimeout(
-			context.Background(),
-			10*time.Second,
-		)
+	if serverFinished {
+		cancelWorker()
+		<-publisherDone
 
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			cancelWorker()
-			<-publisherDone
-			<-workerDone
-			cancel()
-			_ = server.Close()
-			return fmt.Errorf("shutdown HTTP server: %w", err)
+		if !workerFinished {
+			workerErr = <-workerDone
 		}
 
+		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+			return fmt.Errorf("HTTP server: %w", serverErr)
+		}
+
+		if workerErr != nil && !errors.Is(workerErr, context.Canceled) {
+			return fmt.Errorf("worker pool: %w", workerErr)
+		}
+
+		return nil
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		cancel()
 		cancelWorker()
 
 		<-publisherDone
 
-		if err := <-workerDone; err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Task worker stopped with error: %v", err)
+		if !workerFinished {
+			workerErr = <-workerDone
 		}
 
-		if err := <-serverErrors; !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("HTTP server: %w", err)
+		_ = server.Close()
+
+		if !serverFinished {
+			serverErr = <-serverErrors
 		}
 
-		log.Println("HTTP server stopped gracefully")
+		return fmt.Errorf("shutdown HTTP server: %w", err)
 	}
+
+	cancel()
+	cancelWorker()
+
+	<-publisherDone
+
+	if !workerFinished {
+		workerErr = <-workerDone
+	}
+
+	if !serverFinished {
+		serverErr = <-serverErrors
+	}
+
+	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+		return fmt.Errorf("HTTP server: %w", serverErr)
+	}
+
+	if workerErr != nil && !errors.Is(workerErr, context.Canceled) {
+		return fmt.Errorf("worker pool: %w", workerErr)
+	}
+
+	log.Println("HTTP server stopped gracefully")
 
 	return nil
 }

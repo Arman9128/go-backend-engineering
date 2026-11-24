@@ -11,6 +11,7 @@ func setTestEnv(t *testing.T) {
 	t.Setenv("DB_PASSWORD", "test_password")
 	t.Setenv("DB_NAME", "task_platform")
 	t.Setenv("DB_SSLMODE", "disable")
+	t.Setenv("WORKER_COUNT", "")
 }
 
 func TestLoad(t *testing.T) {
@@ -121,5 +122,52 @@ func TestLoadCustomRedisAddr(t *testing.T) {
 
 	if cfg.RedisAddr != "127.0.0.1:6380" {
 		t.Errorf("expected 127.0.0.1:6380, got %s", cfg.RedisAddr)
+	}
+}
+
+func TestLoadDefaultWorkerCount(t *testing.T) {
+	setTestEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.WorkerCount != 3 {
+		t.Errorf("expected worker count 3, got %d", cfg.WorkerCount)
+	}
+}
+
+func TestLoadCustomWorkerCount(t *testing.T) {
+	setTestEnv(t)
+	t.Setenv("WORKER_COUNT", "5")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.WorkerCount != 5 {
+		t.Errorf("expected worker count 5, got %d", cfg.WorkerCount)
+	}
+}
+
+func TestLoadInvalidWorkerCount(t *testing.T) {
+	setTestEnv(t)
+	t.Setenv("WORKER_COUNT", "invalid")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid WORKER_COUNT")
+	}
+}
+
+func TestLoadZeroWorkerCount(t *testing.T) {
+	setTestEnv(t)
+	t.Setenv("WORKER_COUNT", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for zero WORKER_COUNT")
 	}
 }

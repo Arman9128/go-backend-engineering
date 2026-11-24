@@ -9,14 +9,15 @@ import (
 )
 
 type Config struct {
-	HTTPAddr   string
-	RedisAddr  string
-	DBHost     string
-	DBPort     int
-	DBUser     string
-	DBPassword string
-	DBName     string
-	DBSSLMode  string
+	HTTPAddr    string
+	RedisAddr   string
+	WorkerCount int
+	DBHost      string
+	DBPort      int
+	DBUser      string
+	DBPassword  string
+	DBName      string
+	DBSSLMode   string
 }
 
 func Load() (*Config, error) {
@@ -40,15 +41,24 @@ func Load() (*Config, error) {
 		httpAddr = ":8080"
 	}
 
+	workerCount := 3
+	if value := os.Getenv("WORKER_COUNT"); value != "" {
+		workerCount, err = strconv.Atoi(value)
+		if err != nil || workerCount <= 0 {
+			return nil, fmt.Errorf("invalid WORKER_COUNT: must be a positive integer")
+		}
+	}
+
 	cfg := &Config{
-		HTTPAddr:   httpAddr,
-		RedisAddr:  redisAddr,
-		DBHost:     os.Getenv("DB_HOST"),
-		DBPort:     port,
-		DBUser:     os.Getenv("DB_USER"),
-		DBPassword: os.Getenv("DB_PASSWORD"),
-		DBName:     os.Getenv("DB_NAME"),
-		DBSSLMode:  os.Getenv("DB_SSLMODE"),
+		HTTPAddr:    httpAddr,
+		RedisAddr:   redisAddr,
+		WorkerCount: workerCount,
+		DBHost:      os.Getenv("DB_HOST"),
+		DBPort:      port,
+		DBUser:      os.Getenv("DB_USER"),
+		DBPassword:  os.Getenv("DB_PASSWORD"),
+		DBName:      os.Getenv("DB_NAME"),
+		DBSSLMode:   os.Getenv("DB_SSLMODE"),
 	}
 
 	if cfg.DBHost == "" {
