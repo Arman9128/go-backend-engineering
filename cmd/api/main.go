@@ -18,6 +18,7 @@ import (
 	"github.com/Arman9128/go-backend-engineering/internal/queue"
 	"github.com/Arman9128/go-backend-engineering/internal/storage"
 	"github.com/Arman9128/go-backend-engineering/internal/task"
+	"github.com/Arman9128/go-backend-engineering/internal/worker"
 )
 
 func main() {
@@ -74,11 +75,26 @@ func run() error {
 	defer cancelWorker()
 
 	publisher := outbox.NewPublisher(db, redisClient, "tasks:events")
+	taskProcessor := worker.NewTaskProcessor(taskService)
+	taskWorker := worker.NewWorker(
+		redisClient,
+		taskProcessor,
+		"tasks:events",
+		"task-workers",
+		"worker-1",
+	)
+
 	publisherDone := make(chan struct{})
+	workerDone := make(chan error, 1)
 
 	go func() {
 		defer close(publisherDone)
 		runOutboxPublisher(workerCtx, publisher, 500*time.Millisecond)
+	}()
+
+	go func() {
+		log.Println("Task worker starting")
+		workerDone <- taskWorker.Run(workerCtx)
 	}()
 
 	serverErrors := make(chan error, 1)
@@ -92,6 +108,7 @@ func run() error {
 	case err := <-serverErrors:
 		cancelWorker()
 		<-publisherDone
+		<-workerDone
 
 		if !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("HTTP server: %w", err)
@@ -108,6 +125,7 @@ func run() error {
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			cancelWorker()
 			<-publisherDone
+			<-workerDone
 			cancel()
 			_ = server.Close()
 			return fmt.Errorf("shutdown HTTP server: %w", err)
@@ -115,7 +133,12 @@ func run() error {
 
 		cancel()
 		cancelWorker()
+
 		<-publisherDone
+
+		if err := <-workerDone; err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Task worker stopped with error: %v", err)
+		}
 
 		if err := <-serverErrors; !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("HTTP server: %w", err)
