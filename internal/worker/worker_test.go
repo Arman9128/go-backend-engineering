@@ -118,6 +118,80 @@ func (m *mockEventProcessor) Process(
 	return m.err
 }
 
+type intakeShutdownTestProcessor struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (p *intakeShutdownTestProcessor) Process(
+	ctx context.Context,
+	message queue.Message,
+) error {
+	p.calls++
+	if p.calls == 1 {
+		close(p.started)
+	}
+
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestWorkerFinishesActiveMessageAfterIntakeCancellation(t *testing.T) {
+	messages := []queue.Message{
+		{ID: "30-0", EventID: 30},
+		{ID: "31-0", EventID: 31},
+	}
+
+	messageQueue := &mockMessageQueue{}
+	processor := &intakeShutdownTestProcessor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	w := NewWorker(messageQueue, processor, "tasks:events", "task-workers", "worker-1")
+
+	intakeCtx, cancelIntake := context.WithCancel(context.Background())
+	defer cancelIntake()
+
+	processingCtx, cancelProcessing := context.WithCancel(context.Background())
+	defer cancelProcessing()
+
+	done := make(chan struct{})
+	go func() {
+		w.processMessagesWithContexts(intakeCtx, processingCtx, messages)
+		close(done)
+	}()
+
+	select {
+	case <-processor.started:
+	case <-time.After(time.Second):
+		t.Fatal("processor did not start")
+	}
+
+	cancelIntake()
+	close(processor.release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not finish active message")
+	}
+
+	if processor.calls != 1 {
+		t.Fatalf("processor calls = %d, want 1", processor.calls)
+	}
+
+	if len(messageQueue.acknowledged) != 1 ||
+		messageQueue.acknowledged[0] != messages[0].ID {
+		t.Fatalf("acknowledged = %v, want [%s]", messageQueue.acknowledged, messages[0].ID)
+	}
+}
+
 func TestWorkerProcessMessagesSuccess(t *testing.T) {
 	message := queue.Message{
 		ID:      "1-0",

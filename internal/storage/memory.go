@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -43,6 +44,14 @@ func (m *MemoryStorage) Save(taskData *task.Task) error {
 }
 
 func (m *MemoryStorage) GetByID(id int64) (task.Task, error) {
+	return m.GetByIDContext(context.Background(), id)
+}
+
+func (m *MemoryStorage) GetByIDContext(ctx context.Context, id int64) (task.Task, error) {
+	if err := ctx.Err(); err != nil {
+		return task.Task{}, err
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

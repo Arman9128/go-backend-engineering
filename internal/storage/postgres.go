@@ -84,6 +84,10 @@ func (s *PostgresStorage) Save(taskData *task.Task) error {
 }
 
 func (s *PostgresStorage) GetByID(id int64) (task.Task, error) {
+	return s.GetByIDContext(context.Background(), id)
+}
+
+func (s *PostgresStorage) GetByIDContext(ctx context.Context, id int64) (task.Task, error) {
 	var foundTask task.Task
 
 	query := `
@@ -92,7 +96,7 @@ func (s *PostgresStorage) GetByID(id int64) (task.Task, error) {
 		WHERE id = $1
 	`
 
-	err := s.db.QueryRow(query, id).Scan(
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&foundTask.ID,
 		&foundTask.Name,
 		&foundTask.Status,

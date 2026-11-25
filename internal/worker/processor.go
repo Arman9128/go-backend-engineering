@@ -19,6 +19,10 @@ type TaskService interface {
 	GetTaskByID(id int64) (task.Task, error)
 }
 
+type ContextTaskService interface {
+	GetTaskByIDContext(ctx context.Context, id int64) (task.Task, error)
+}
+
 type TaskProcessor struct {
 	taskService TaskService
 }
@@ -67,7 +71,17 @@ func (p *TaskProcessor) Process(ctx context.Context, message queue.Message) erro
 		return fmt.Errorf("task creation time cannot be zero")
 	}
 
-	foundTask, err := p.taskService.GetTaskByID(event.ID)
+	var foundTask task.Task
+	var err error
+
+	if service, ok := p.taskService.(ContextTaskService); ok {
+		foundTask, err = service.GetTaskByIDContext(ctx, event.ID)
+	} else {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		foundTask, err = p.taskService.GetTaskByID(event.ID)
+	}
 	if err != nil {
 		return fmt.Errorf("get task %d for event %d: %w", event.ID, message.EventID, err)
 	}

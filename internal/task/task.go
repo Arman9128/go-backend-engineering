@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,10 @@ type Storage interface {
 	Save(task *Task) error
 	GetByID(id int64) (Task, error)
 	UpdateStatus(id int64, status string) error
+}
+
+type ContextStorage interface {
+	GetByIDContext(ctx context.Context, id int64) (Task, error)
 }
 
 type Service struct {
@@ -49,11 +54,27 @@ func (s *Service) SubmitTaskWithTags(taskName string, tags []string) (*Task, err
 }
 
 func (s *Service) GetTaskByID(id int64) (Task, error) {
+	return s.GetTaskByIDContext(context.Background(), id)
+}
+
+func (s *Service) GetTaskByIDContext(ctx context.Context, id int64) (Task, error) {
+	if err := ctx.Err(); err != nil {
+		return Task{}, err
+	}
+
 	if id <= 0 {
 		return Task{}, fmt.Errorf("get task: invalid ID %d", id)
 	}
 
-	foundTask, err := s.storage.GetByID(id)
+	var foundTask Task
+	var err error
+
+	if storage, ok := s.storage.(ContextStorage); ok {
+		foundTask, err = storage.GetByIDContext(ctx, id)
+	} else {
+		foundTask, err = s.storage.GetByID(id)
+	}
+
 	if err != nil {
 		return Task{}, fmt.Errorf("get task %d: %w", id, err)
 	}

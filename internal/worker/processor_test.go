@@ -24,6 +24,71 @@ func (m *mockTaskService) GetTaskByID(id int64) (task.Task, error) {
 	return m.task, m.err
 }
 
+type contextAwareMockTaskService struct {
+	mockTaskService
+	receivedCtx context.Context
+}
+
+func (m *contextAwareMockTaskService) GetTaskByIDContext(ctx context.Context, id int64) (task.Task, error) {
+	m.receivedCtx = ctx
+	m.id = id
+	m.calls++
+	return m.task, m.err
+}
+
+func TestTaskProcessorPassesContextToTaskService(t *testing.T) {
+	createdAt := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+	event := TaskCreatedEvent{
+		ID:        10,
+		Name:      "test-task",
+		Status:    task.StatusPending,
+		CreatedAt: createdAt,
+	}
+
+	service := &contextAwareMockTaskService{
+		mockTaskService: mockTaskService{
+			task: task.Task{
+				ID:        event.ID,
+				Name:      event.Name,
+				Status:    event.Status,
+				CreatedAt: event.CreatedAt,
+			},
+		},
+	}
+
+	processor := NewTaskProcessor(service)
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.WithValue(context.Background(), struct{}{}, "test-context")
+	message := queue.Message{
+		ID:        "1-0",
+		EventID:   1,
+		EventType: "task.created",
+		Payload:   payload,
+	}
+
+	if err := processor.Process(ctx, message); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	if service.receivedCtx != ctx {
+		t.Fatal("TaskProcessor did not pass the original context to TaskService")
+	}
+
+	if service.calls != 1 {
+		t.Fatalf("GetTaskByIDContext() calls = %d, want 1", service.calls)
+	}
+
+	if service.id != event.ID {
+		t.Fatalf("GetTaskByIDContext() ID = %d, want %d", service.id, event.ID)
+	}
+}
+
 func TestTaskProcessorProcessSuccess(t *testing.T) {
 	createdAt := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 

@@ -255,3 +255,117 @@ func (q *poolStartupErrorQueue) CreateConsumerGroup(
 ) error {
 	return fmt.Errorf("create consumer group: %w", q.err)
 }
+
+type poolShutdownTestQueue struct {
+	*poolTestQueue
+	once sync.Once
+}
+
+func (q *poolShutdownTestQueue) ReadGroup(
+	ctx context.Context,
+	stream string,
+	group string,
+	consumer string,
+	count int64,
+	block time.Duration,
+) ([]queue.Message, error) {
+	first := false
+
+	q.once.Do(func() {
+		first = true
+	})
+
+	if first {
+		return []queue.Message{
+			{
+				ID:      "1-0",
+				EventID: 1,
+			},
+		}, nil
+	}
+
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type poolShutdownTestProcessor struct {
+	started   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+}
+
+func (p *poolShutdownTestProcessor) Process(
+	ctx context.Context,
+	message queue.Message,
+) error {
+	close(p.started)
+
+	<-ctx.Done()
+	close(p.cancelled)
+
+	<-p.release
+	return ctx.Err()
+}
+
+func TestPoolWaitsForProcessorAfterShutdownTimeout(t *testing.T) {
+	baseQueue := newPoolTestQueue(1)
+	messageQueue := &poolShutdownTestQueue{
+		poolTestQueue: baseQueue,
+	}
+
+	processor := &poolShutdownTestProcessor{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	pool := NewPool(
+		messageQueue,
+		processor,
+		"tasks:events",
+		"task-workers",
+		"worker",
+		1,
+	)
+	pool.SetShutdownTimeout(20 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- pool.Run(ctx)
+	}()
+
+	select {
+	case <-processor.started:
+	case <-time.After(time.Second):
+		t.Fatal("processor did not start")
+	}
+
+	cancel()
+
+	select {
+	case <-processor.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("processor context was not cancelled after shutdown timeout")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("pool returned before processor finished: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	close(processor.release)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Pool.Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker pool did not stop after processor finished")
+	}
+}

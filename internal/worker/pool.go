@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
+
+const defaultShutdownTimeout = 30 * time.Second
 
 type Pool struct {
 	queue            MessageQueue
@@ -16,6 +19,7 @@ type Pool struct {
 	group            string
 	consumerPrefix   string
 	workerCount      int
+	shutdownTimeout  time.Duration
 }
 
 func NewPool(
@@ -27,17 +31,24 @@ func NewPool(
 	workerCount int,
 ) *Pool {
 	return &Pool{
-		queue:          messageQueue,
-		processor:      processor,
-		stream:         stream,
-		group:          group,
-		consumerPrefix: consumerPrefix,
-		workerCount:    workerCount,
+		queue:           messageQueue,
+		processor:       processor,
+		stream:          stream,
+		group:           group,
+		consumerPrefix:  consumerPrefix,
+		workerCount:     workerCount,
+		shutdownTimeout: defaultShutdownTimeout,
 	}
 }
 
 func (p *Pool) SetIdempotencyStore(store IdempotencyStore) {
 	p.idempotencyStore = store
+}
+
+func (p *Pool) SetShutdownTimeout(timeout time.Duration) {
+	if timeout > 0 {
+		p.shutdownTimeout = timeout
+	}
 }
 
 func (p *Pool) Run(ctx context.Context) error {
@@ -61,8 +72,11 @@ func (p *Pool) Run(ctx context.Context) error {
 		return err
 	}
 
-	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	intakeCtx, cancelIntake := context.WithCancel(ctx)
+	defer cancelIntake()
+
+	processingCtx, cancelProcessing := context.WithCancel(context.Background())
+	defer cancelProcessing()
 
 	errorsCh := make(chan error, p.workerCount)
 
@@ -87,7 +101,7 @@ func (p *Pool) Run(ctx context.Context) error {
 		go func(consumer string, taskWorker *Worker) {
 			defer wg.Done()
 
-			err := taskWorker.Run(workerCtx)
+			err := taskWorker.run(intakeCtx, processingCtx)
 			if err == nil {
 				err = errors.New("worker stopped unexpectedly without an error")
 			}
@@ -119,8 +133,34 @@ func (p *Pool) Run(ctx context.Context) error {
 		}
 	}
 
-	cancel()
-	wg.Wait()
+	// Stop fetching new messages while allowing active processing to finish.
+	cancelIntake()
+
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+	}()
+
+	timeout := p.shutdownTimeout
+	if timeout <= 0 {
+		timeout = defaultShutdownTimeout
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-workersDone:
+		log.Println("Worker pool stopped gracefully")
+
+	case <-timer.C:
+		log.Printf("Worker pool shutdown timed out after %s; cancelling active processing", timeout)
+		cancelProcessing()
+
+		// Wait for workers to exit before allowing dependent resources to close.
+		<-workersDone
+	}
 
 	return runErr
 }

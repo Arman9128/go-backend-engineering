@@ -109,6 +109,10 @@ func (w *Worker) SetLeaseRenewInterval(interval time.Duration) {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	return w.run(ctx, ctx)
+}
+
+func (w *Worker) run(intakeCtx, processingCtx context.Context) error {
 	if w.queue == nil {
 		return fmt.Errorf("worker: message queue is nil")
 	}
@@ -121,7 +125,11 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("worker: stream, group and consumer are required")
 	}
 
-	if err := w.queue.CreateConsumerGroup(ctx, w.stream, w.group); err != nil {
+	if err := intakeCtx.Err(); err != nil {
+		return err
+	}
+
+	if err := w.queue.CreateConsumerGroup(intakeCtx, w.stream, w.group); err != nil {
 		return fmt.Errorf("worker: create consumer group: %w", err)
 	}
 
@@ -133,27 +141,34 @@ func (w *Worker) Run(ctx context.Context) error {
 	)
 
 	for {
-		if err := ctx.Err(); err != nil {
-			log.Println("Worker stopped")
+		if err := intakeCtx.Err(); err != nil {
+			log.Println("Worker intake stopped")
 			return err
 		}
 
-		if err := w.recoverPending(ctx); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		if err := processingCtx.Err(); err != nil {
+			return err
+		}
+
+		if err := w.recoverPendingWithContexts(intakeCtx, processingCtx); err != nil {
+			if intakeCtx.Err() != nil {
+				return intakeCtx.Err()
+			}
+			if processingCtx.Err() != nil {
+				return processingCtx.Err()
 			}
 
 			log.Printf("Worker pending recovery error: %v", err)
 
-			if !wait(ctx, time.Second) {
-				return ctx.Err()
+			if !wait(intakeCtx, time.Second) {
+				return intakeCtx.Err()
 			}
 
 			continue
 		}
 
 		messages, err := w.queue.ReadGroup(
-			ctx,
+			intakeCtx,
 			w.stream,
 			w.group,
 			w.consumer,
@@ -162,33 +177,46 @@ func (w *Worker) Run(ctx context.Context) error {
 		)
 
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if intakeCtx.Err() != nil {
+				return intakeCtx.Err()
+			}
+			if processingCtx.Err() != nil {
+				return processingCtx.Err()
 			}
 
 			log.Printf("Worker read error: %v", err)
 
-			if !wait(ctx, time.Second) {
-				return ctx.Err()
+			if !wait(intakeCtx, time.Second) {
+				return intakeCtx.Err()
 			}
 
 			continue
 		}
 
-		w.processMessages(ctx, messages)
+		w.processMessagesWithContexts(intakeCtx, processingCtx, messages)
 	}
 }
 
 func (w *Worker) recoverPending(ctx context.Context) error {
+	return w.recoverPendingWithContexts(ctx, ctx)
+}
+
+func (w *Worker) recoverPendingWithContexts(
+	intakeCtx context.Context,
+	processingCtx context.Context,
+) error {
 	start := "0-0"
 
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := intakeCtx.Err(); err != nil {
+			return err
+		}
+		if err := processingCtx.Err(); err != nil {
 			return err
 		}
 
 		messages, next, err := w.queue.ClaimPending(
-			ctx,
+			intakeCtx,
 			w.stream,
 			w.group,
 			w.consumer,
@@ -200,7 +228,14 @@ func (w *Worker) recoverPending(ctx context.Context) error {
 			return err
 		}
 
-		w.processMessages(ctx, messages)
+		w.processMessagesWithContexts(intakeCtx, processingCtx, messages)
+
+		if err := intakeCtx.Err(); err != nil {
+			return err
+		}
+		if err := processingCtx.Err(); err != nil {
+			return err
+		}
 
 		if next == "" || next == "0-0" {
 			return nil
@@ -211,8 +246,19 @@ func (w *Worker) recoverPending(ctx context.Context) error {
 }
 
 func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) {
+	w.processMessagesWithContexts(ctx, ctx, messages)
+}
+
+func (w *Worker) processMessagesWithContexts(
+	intakeCtx context.Context,
+	processingCtx context.Context,
+	messages []queue.Message,
+) {
 	for _, message := range messages {
-		if err := ctx.Err(); err != nil {
+		if err := intakeCtx.Err(); err != nil {
+			return
+		}
+		if err := processingCtx.Err(); err != nil {
 			return
 		}
 
@@ -220,7 +266,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 
 		if w.idempotencyStore != nil {
 			token, acquired, completed, err := w.idempotencyStore.Acquire(
-				ctx,
+				processingCtx,
 				message.EventID,
 			)
 			if err != nil {
@@ -234,7 +280,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 			}
 
 			if completed {
-				if err := w.queue.Ack(ctx, w.stream, w.group, message.ID); err != nil {
+				if err := w.queue.Ack(processingCtx, w.stream, w.group, message.ID); err != nil {
 					log.Printf(
 						"Worker duplicate ACK failed: message_id=%s event_id=%d error=%v",
 						message.ID,
@@ -269,7 +315,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 		if w.idempotencyStore != nil {
 			var heartbeatErr error
 			processingErr, heartbeatErr = w.processWithHeartbeat(
-				ctx,
+				processingCtx,
 				message,
 				lockToken,
 			)
@@ -283,7 +329,11 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 				continue
 			}
 		} else {
-			processingErr = w.processor.Process(ctx, message)
+			processingErr = w.processor.Process(processingCtx, message)
+		}
+
+		if processingCtx.Err() != nil {
+			return
 		}
 
 		if processingErr != nil {
@@ -296,7 +346,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 
 			if w.idempotencyStore != nil {
 				if err := w.idempotencyStore.Release(
-					ctx,
+					processingCtx,
 					message.EventID,
 					lockToken,
 					processingErr,
@@ -312,7 +362,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 			}
 
 			moved, dlqErr := w.queue.MoveToDeadLetter(
-				ctx,
+				processingCtx,
 				w.stream,
 				w.group,
 				w.deadLetterStream,
@@ -341,7 +391,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 
 		if w.idempotencyStore != nil {
 			if err := w.idempotencyStore.Complete(
-				ctx,
+				processingCtx,
 				message.EventID,
 				lockToken,
 			); err != nil {
@@ -355,7 +405,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 			}
 		}
 
-		if err := w.queue.Ack(ctx, w.stream, w.group, message.ID); err != nil {
+		if err := w.queue.Ack(processingCtx, w.stream, w.group, message.ID); err != nil {
 			log.Printf(
 				"Worker ACK failed: message_id=%s error=%v",
 				message.ID,

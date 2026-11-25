@@ -65,14 +65,17 @@ func run() error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(
+	signalCtx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
 		syscall.SIGTERM,
 	)
 	defer stop()
 
-	workerCtx, cancelWorker := context.WithCancel(ctx)
+	publisherCtx, cancelPublisher := context.WithCancel(context.Background())
+	defer cancelPublisher()
+
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	defer cancelWorker()
 
 	publisher := outbox.NewPublisher(db, redisClient, "tasks:events")
@@ -91,10 +94,11 @@ func run() error {
 
 	publisherDone := make(chan struct{})
 	workerDone := make(chan error, 1)
+	serverErrors := make(chan error, 1)
 
 	go func() {
 		defer close(publisherDone)
-		runOutboxPublisher(workerCtx, publisher, 500*time.Millisecond)
+		runOutboxPublisher(publisherCtx, publisher, 500*time.Millisecond)
 	}()
 
 	go func() {
@@ -102,106 +106,83 @@ func run() error {
 		workerDone <- taskPool.Run(workerCtx)
 	}()
 
-	serverErrors := make(chan error, 1)
-
 	go func() {
 		log.Printf("HTTP server listening on %s", cfg.HTTPAddr)
 		serverErrors <- server.ListenAndServe()
 	}()
 
-	var serverErr error
-	serverFinished := false
-	var workerErr error
-	workerFinished := false
+	var (
+		runErr         error
+		workerFinished bool
+		serverFinished bool
+	)
 
 	select {
-	case serverErr = <-serverErrors:
+	case serverErr := <-serverErrors:
 		serverFinished = true
-		stop()
-
-	case workerErr = <-workerDone:
-		workerFinished = true
-
-		if ctx.Err() == nil {
-			if workerErr == nil {
-				workerErr = errors.New("worker pool stopped unexpectedly")
-			}
-
-			log.Printf("Task worker pool stopped unexpectedly: %v", workerErr)
-			stop()
+		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+			runErr = fmt.Errorf("HTTP server: %w", serverErr)
+			log.Printf("HTTP server stopped unexpectedly: %v", serverErr)
 		}
 
-	case <-ctx.Done():
+	case workerErr := <-workerDone:
+		workerFinished = true
+		if workerErr == nil {
+			workerErr = errors.New("worker pool stopped unexpectedly")
+		}
+		runErr = fmt.Errorf("worker pool stopped unexpectedly: %w", workerErr)
+		log.Printf("%v", runErr)
+
+	case <-signalCtx.Done():
 		log.Println("Shutdown signal received")
 	}
 
-	if serverFinished {
-		cancelWorker()
-		<-publisherDone
-
-		if !workerFinished {
-			workerErr = <-workerDone
-		}
-
-		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
-			return fmt.Errorf("HTTP server: %w", serverErr)
-		}
-
-		if workerErr != nil && !errors.Is(workerErr, context.Canceled) {
-			return fmt.Errorf("worker pool: %w", workerErr)
-		}
-
-		return nil
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(
+	shutdownCtx, cancelShutdown := context.WithTimeout(
 		context.Background(),
 		10*time.Second,
 	)
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		cancel()
-		cancelWorker()
-
-		<-publisherDone
-
-		if !workerFinished {
-			workerErr = <-workerDone
-		}
-
+		runErr = errors.Join(
+			runErr,
+			fmt.Errorf("shutdown HTTP server: %w", err),
+		)
 		_ = server.Close()
-
-		if !serverFinished {
-			serverErr = <-serverErrors
-		}
-
-		return fmt.Errorf("shutdown HTTP server: %w", err)
 	}
 
-	cancel()
-	cancelWorker()
-
-	<-publisherDone
-
-	if !workerFinished {
-		workerErr = <-workerDone
-	}
+	cancelShutdown()
 
 	if !serverFinished {
-		serverErr = <-serverErrors
+		serverErr := <-serverErrors
+		serverFinished = true
+
+		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+			runErr = errors.Join(
+				runErr,
+				fmt.Errorf("HTTP server: %w", serverErr),
+			)
+		}
 	}
 
-	if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
-		return fmt.Errorf("HTTP server: %w", serverErr)
+	cancelPublisher()
+	<-publisherDone
+
+	cancelWorker()
+	if !workerFinished {
+		workerErr := <-workerDone
+		workerFinished = true
+
+		if workerErr != nil && !errors.Is(workerErr, context.Canceled) {
+			runErr = errors.Join(
+				runErr,
+				fmt.Errorf("worker pool: %w", workerErr),
+			)
+		}
 	}
 
-	if workerErr != nil && !errors.Is(workerErr, context.Canceled) {
-		return fmt.Errorf("worker pool: %w", workerErr)
-	}
+	log.Println("Application shutdown complete")
 
-	log.Println("HTTP server stopped gracefully")
-
-	return nil
+	return runErr
 }
 
 func runOutboxPublisher(

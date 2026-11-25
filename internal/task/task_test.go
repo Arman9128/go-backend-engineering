@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -219,5 +220,46 @@ func TestGetTaskByIDInvalidID(t *testing.T) {
 
 	if storage.getByIDCalls != 0 {
 		t.Errorf("expected storage not to be called, got %d calls", storage.getByIDCalls)
+	}
+}
+
+func TestGetTaskByIDContextCanceled(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.GetTaskByIDContext(ctx, 125)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	if storage.getByIDCalls != 0 {
+		t.Fatalf("expected storage not to be called, got %d calls", storage.getByIDCalls)
+	}
+}
+
+func TestGetTaskByIDContextLegacyStorageFallback(t *testing.T) {
+	expectedTask := Task{
+		ID:     125,
+		Name:   "send-email",
+		Status: StatusPending,
+	}
+
+	storage := &mockStorage{foundTask: expectedTask}
+	service := NewService("Test API", storage)
+
+	foundTask, err := service.GetTaskByIDContext(context.Background(), 125)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if foundTask.ID != expectedTask.ID {
+		t.Errorf("expected ID %d, got %d", expectedTask.ID, foundTask.ID)
+	}
+
+	if storage.getByIDCalls != 1 {
+		t.Errorf("expected 1 GetByID call, got %d", storage.getByIDCalls)
 	}
 }
