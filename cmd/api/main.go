@@ -14,6 +14,7 @@ import (
 	"github.com/Arman9128/go-backend-engineering/internal/config"
 	"github.com/Arman9128/go-backend-engineering/internal/database"
 	"github.com/Arman9128/go-backend-engineering/internal/httpapi"
+	"github.com/Arman9128/go-backend-engineering/internal/idempotency"
 	"github.com/Arman9128/go-backend-engineering/internal/outbox"
 	"github.com/Arman9128/go-backend-engineering/internal/queue"
 	"github.com/Arman9128/go-backend-engineering/internal/storage"
@@ -84,6 +85,9 @@ func run() error {
 		"worker",
 		cfg.WorkerCount,
 	)
+
+	idempotencyStore := idempotency.NewPostgresStore(db, 2*time.Minute)
+	taskPool.SetIdempotencyStore(idempotencyStore)
 
 	publisherDone := make(chan struct{})
 	workerDone := make(chan error, 1)

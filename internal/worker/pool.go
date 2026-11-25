@@ -9,12 +9,13 @@ import (
 )
 
 type Pool struct {
-	queue          MessageQueue
-	processor      EventProcessor
-	stream         string
-	group          string
-	consumerPrefix string
-	workerCount    int
+	queue            MessageQueue
+	processor        EventProcessor
+	idempotencyStore IdempotencyStore
+	stream           string
+	group            string
+	consumerPrefix   string
+	workerCount      int
 }
 
 func NewPool(
@@ -33,6 +34,10 @@ func NewPool(
 		consumerPrefix: consumerPrefix,
 		workerCount:    workerCount,
 	}
+}
+
+func (p *Pool) SetIdempotencyStore(store IdempotencyStore) {
+	p.idempotencyStore = store
 }
 
 func (p *Pool) Run(ctx context.Context) error {
@@ -72,6 +77,10 @@ func (p *Pool) Run(ctx context.Context) error {
 			p.group,
 			consumer,
 		)
+
+		if p.idempotencyStore != nil {
+			taskWorker.SetIdempotencyStore(p.idempotencyStore)
+		}
 
 		wg.Add(1)
 

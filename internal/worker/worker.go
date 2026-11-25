@@ -53,18 +53,27 @@ type MessageQueue interface {
 	) ([]queue.Message, string, error)
 }
 
-type Worker struct {
-	queue     MessageQueue
-	processor EventProcessor
+type IdempotencyStore interface {
+	Acquire(ctx context.Context, eventID int64) (token string, acquired bool, completed bool, err error)
+	Renew(ctx context.Context, eventID int64, token string) error
+	Complete(ctx context.Context, eventID int64, token string) error
+	Release(ctx context.Context, eventID int64, token string, processingErr error) error
+}
 
-	stream           string
-	group            string
-	consumer         string
-	deadLetterStream string
-	maxAttempts      int64
-	batchSize        int64
-	blockDuration    time.Duration
-	claimMinIdle     time.Duration
+type Worker struct {
+	queue            MessageQueue
+	processor        EventProcessor
+	idempotencyStore IdempotencyStore
+
+	stream             string
+	group              string
+	consumer           string
+	deadLetterStream   string
+	maxAttempts        int64
+	batchSize          int64
+	blockDuration      time.Duration
+	claimMinIdle       time.Duration
+	leaseRenewInterval time.Duration
 }
 
 func NewWorker(
@@ -75,16 +84,27 @@ func NewWorker(
 	consumer string,
 ) *Worker {
 	return &Worker{
-		queue:            messageQueue,
-		processor:        processor,
-		stream:           stream,
-		group:            group,
-		consumer:         consumer,
-		deadLetterStream: stream + ":dead",
-		maxAttempts:      5,
-		batchSize:        10,
-		blockDuration:    2 * time.Second,
-		claimMinIdle:     30 * time.Second,
+		queue:              messageQueue,
+		processor:          processor,
+		stream:             stream,
+		group:              group,
+		consumer:           consumer,
+		deadLetterStream:   stream + ":dead",
+		maxAttempts:        5,
+		batchSize:          10,
+		blockDuration:      2 * time.Second,
+		claimMinIdle:       30 * time.Second,
+		leaseRenewInterval: 30 * time.Second,
+	}
+}
+
+func (w *Worker) SetIdempotencyStore(store IdempotencyStore) {
+	w.idempotencyStore = store
+}
+
+func (w *Worker) SetLeaseRenewInterval(interval time.Duration) {
+	if interval > 0 {
+		w.leaseRenewInterval = interval
 	}
 }
 
@@ -196,13 +216,100 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 			return
 		}
 
-		if err := w.processor.Process(ctx, message); err != nil {
+		var lockToken string
+
+		if w.idempotencyStore != nil {
+			token, acquired, completed, err := w.idempotencyStore.Acquire(
+				ctx,
+				message.EventID,
+			)
+			if err != nil {
+				log.Printf(
+					"Worker idempotency acquire failed: message_id=%s event_id=%d error=%v",
+					message.ID,
+					message.EventID,
+					err,
+				)
+				continue
+			}
+
+			if completed {
+				if err := w.queue.Ack(ctx, w.stream, w.group, message.ID); err != nil {
+					log.Printf(
+						"Worker duplicate ACK failed: message_id=%s event_id=%d error=%v",
+						message.ID,
+						message.EventID,
+						err,
+					)
+					continue
+				}
+
+				log.Printf(
+					"Worker duplicate event acknowledged: message_id=%s event_id=%d",
+					message.ID,
+					message.EventID,
+				)
+				continue
+			}
+
+			if !acquired {
+				log.Printf(
+					"Worker event is already being processed: message_id=%s event_id=%d",
+					message.ID,
+					message.EventID,
+				)
+				continue
+			}
+
+			lockToken = token
+		}
+
+		var processingErr error
+
+		if w.idempotencyStore != nil {
+			var heartbeatErr error
+			processingErr, heartbeatErr = w.processWithHeartbeat(
+				ctx,
+				message,
+				lockToken,
+			)
+			if heartbeatErr != nil {
+				log.Printf(
+					"Worker idempotency lease renewal failed: message_id=%s event_id=%d error=%v",
+					message.ID,
+					message.EventID,
+					heartbeatErr,
+				)
+				continue
+			}
+		} else {
+			processingErr = w.processor.Process(ctx, message)
+		}
+
+		if processingErr != nil {
 			log.Printf(
 				"Worker processing failed: message_id=%s event_id=%d error=%v",
 				message.ID,
 				message.EventID,
-				err,
+				processingErr,
 			)
+
+			if w.idempotencyStore != nil {
+				if err := w.idempotencyStore.Release(
+					ctx,
+					message.EventID,
+					lockToken,
+					processingErr,
+				); err != nil {
+					log.Printf(
+						"Worker idempotency release failed: message_id=%s event_id=%d error=%v",
+						message.ID,
+						message.EventID,
+						err,
+					)
+					continue
+				}
+			}
 
 			moved, dlqErr := w.queue.MoveToDeadLetter(
 				ctx,
@@ -211,7 +318,7 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 				w.deadLetterStream,
 				message,
 				w.maxAttempts,
-				err.Error(),
+				processingErr.Error(),
 			)
 			if dlqErr != nil {
 				log.Printf(
@@ -232,6 +339,22 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 			continue
 		}
 
+		if w.idempotencyStore != nil {
+			if err := w.idempotencyStore.Complete(
+				ctx,
+				message.EventID,
+				lockToken,
+			); err != nil {
+				log.Printf(
+					"Worker idempotency completion failed: message_id=%s event_id=%d error=%v",
+					message.ID,
+					message.EventID,
+					err,
+				)
+				continue
+			}
+		}
+
 		if err := w.queue.Ack(ctx, w.stream, w.group, message.ID); err != nil {
 			log.Printf(
 				"Worker ACK failed: message_id=%s error=%v",
@@ -247,6 +370,62 @@ func (w *Worker) processMessages(ctx context.Context, messages []queue.Message) 
 			message.EventID,
 		)
 	}
+}
+
+func (w *Worker) processWithHeartbeat(
+	ctx context.Context,
+	message queue.Message,
+	token string,
+) (error, error) {
+	processCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	interval := w.leaseRenewInterval
+	if interval <= 0 {
+		return w.processor.Process(processCtx, message), nil
+	}
+
+	stop := make(chan struct{})
+	heartbeatDone := make(chan error, 1)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				heartbeatDone <- nil
+				return
+			case <-processCtx.Done():
+				heartbeatDone <- nil
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(
+					processCtx,
+					interval/2,
+				)
+				err := w.idempotencyStore.Renew(
+					renewCtx,
+					message.EventID,
+					token,
+				)
+				renewCancel()
+
+				if err != nil {
+					heartbeatDone <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	processingErr := w.processor.Process(processCtx, message)
+	close(stop)
+
+	heartbeatErr := <-heartbeatDone
+	return processingErr, heartbeatErr
 }
 
 func wait(ctx context.Context, duration time.Duration) bool {
