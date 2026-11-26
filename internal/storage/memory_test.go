@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -288,5 +290,76 @@ func TestUpdateStatusInvalidStatus(t *testing.T) {
 
 	if storedTask.Status != task.StatusPending {
 		t.Errorf("expected status to remain pending, got %s", storedTask.Status)
+	}
+}
+
+func TestMemoryStorageCompleteTaskContext(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	newTask := &task.Task{
+		Name:   "send-email",
+		Status: task.StatusPending,
+	}
+
+	if err := storage.Save(newTask); err != nil {
+		t.Fatalf("unexpected save error: %v", err)
+	}
+
+	ctx := context.Background()
+
+	if err := storage.CompleteTaskContext(ctx, newTask.ID); err != nil {
+		t.Fatalf("unexpected completion error: %v", err)
+	}
+
+	completedTask, err := storage.GetByID(newTask.ID)
+	if err != nil {
+		t.Fatalf("unexpected get error: %v", err)
+	}
+
+	if completedTask.Status != task.StatusCompleted {
+		t.Fatalf("status = %q, want %q", completedTask.Status, task.StatusCompleted)
+	}
+
+	if err := storage.CompleteTaskContext(ctx, newTask.ID); err != nil {
+		t.Fatalf("repeated completion should succeed, got: %v", err)
+	}
+}
+
+func TestMemoryStorageCompleteTaskContextInvalidTransition(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	newTask := &task.Task{
+		Name:   "send-email",
+		Status: task.StatusProcessing,
+	}
+
+	if err := storage.Save(newTask); err != nil {
+		t.Fatalf("unexpected save error: %v", err)
+	}
+
+	err := storage.CompleteTaskContext(context.Background(), newTask.ID)
+	if !errors.Is(err, task.ErrInvalidTransition) {
+		t.Fatalf("error = %v, want %v", err, task.ErrInvalidTransition)
+	}
+}
+
+func TestMemoryStorageCompleteTaskContextNotFound(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	err := storage.CompleteTaskContext(context.Background(), 999)
+	if !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("error = %v, want %v", err, task.ErrNotFound)
+	}
+}
+
+func TestMemoryStorageCompleteTaskContextCanceled(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := storage.CompleteTaskContext(ctx, 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want %v", err, context.Canceled)
 	}
 }

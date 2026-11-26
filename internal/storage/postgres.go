@@ -114,6 +114,64 @@ func (s *PostgresStorage) GetByIDContext(ctx context.Context, id int64) (task.Ta
 	return foundTask, nil
 }
 
+func (s *PostgresStorage) CompleteTaskContext(ctx context.Context, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin task completion transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var currentStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT status
+		FROM tasks
+		WHERE id = $1
+		FOR UPDATE
+	`, id).Scan(&currentStatus)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("complete task %d: %w", id, task.ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("get task %d status: %w", id, err)
+	}
+
+	if currentStatus == task.StatusCompleted {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit task completion transaction: %w", err)
+		}
+		return nil
+	}
+
+	if currentStatus != task.StatusPending {
+		return fmt.Errorf(
+			"complete task %d from status %q: %w",
+			id,
+			currentStatus,
+			task.ErrInvalidTransition,
+		)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE tasks
+		SET status = $1
+		WHERE id = $2
+	`, task.StatusCompleted, id)
+	if err != nil {
+		return fmt.Errorf("complete task %d in PostgreSQL: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit task completion transaction: %w", err)
+	}
+
+	return nil
+}
+
 func (s *PostgresStorage) UpdateStatus(id int64, status string) error {
 	if !task.IsValidStatus(status) {
 		return fmt.Errorf("update task status: invalid status %q", status)

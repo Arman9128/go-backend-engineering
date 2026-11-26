@@ -16,6 +16,10 @@ type mockStorage struct {
 	foundTask         Task
 	updatedTaskID     int64
 	updatedStatus     string
+	completionErr     error
+	completionCalls   int
+	completionTaskID  int64
+	completionContext context.Context
 }
 
 func (m *mockStorage) Save(task *Task) error {
@@ -42,6 +46,13 @@ func (m *mockStorage) UpdateStatus(id int64, status string) error {
 	m.updatedTaskID = id
 	m.updatedStatus = status
 	return m.err
+}
+
+func (m *mockStorage) CompleteTaskContext(ctx context.Context, id int64) error {
+	m.completionCalls++
+	m.completionTaskID = id
+	m.completionContext = ctx
+	return m.completionErr
 }
 
 func TestSubmitTask(t *testing.T) {
@@ -261,5 +272,88 @@ func TestGetTaskByIDContextLegacyStorageFallback(t *testing.T) {
 
 	if storage.getByIDCalls != 1 {
 		t.Errorf("expected 1 GetByID call, got %d", storage.getByIDCalls)
+	}
+}
+
+type legacyMockStorage struct {
+	Storage
+}
+
+func TestCompleteTaskContext(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+	ctx := context.Background()
+
+	if err := service.CompleteTaskContext(ctx, 125); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if storage.completionCalls != 1 {
+		t.Fatalf("expected 1 completion call, got %d", storage.completionCalls)
+	}
+
+	if storage.completionTaskID != 125 {
+		t.Errorf("expected task ID 125, got %d", storage.completionTaskID)
+	}
+
+	if storage.completionContext != ctx {
+		t.Error("expected the original context to be passed to storage")
+	}
+}
+
+func TestCompleteTaskContextStorageError(t *testing.T) {
+	expectedErr := errors.New("database unavailable")
+	storage := &mockStorage{completionErr: expectedErr}
+	service := NewService("Test API", storage)
+
+	err := service.CompleteTaskContext(context.Background(), 125)
+
+	if !errors.Is(err, expectedErr) {
+		t.Errorf("expected wrapped storage error, got %v", err)
+	}
+
+	if storage.completionCalls != 1 {
+		t.Errorf("expected 1 completion call, got %d", storage.completionCalls)
+	}
+}
+
+func TestCompleteTaskContextInvalidID(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+
+	err := service.CompleteTaskContext(context.Background(), 0)
+	if err == nil {
+		t.Fatal("expected error for invalid ID")
+	}
+
+	if storage.completionCalls != 0 {
+		t.Errorf("expected storage not to be called, got %d calls", storage.completionCalls)
+	}
+}
+
+func TestCompleteTaskContextCanceled(t *testing.T) {
+	storage := &mockStorage{}
+	service := NewService("Test API", storage)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := service.CompleteTaskContext(ctx, 125)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	if storage.completionCalls != 0 {
+		t.Errorf("expected storage not to be called, got %d calls", storage.completionCalls)
+	}
+}
+
+func TestCompleteTaskContextLegacyStorage(t *testing.T) {
+	storage := &legacyMockStorage{Storage: &mockStorage{}}
+	service := NewService("Test API", storage)
+
+	err := service.CompleteTaskContext(context.Background(), 125)
+	if err == nil {
+		t.Fatal("expected error when storage does not support atomic completion")
 	}
 }

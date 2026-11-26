@@ -17,6 +17,10 @@ type ContextStorage interface {
 	GetByIDContext(ctx context.Context, id int64) (Task, error)
 }
 
+type TaskCompletionStorage interface {
+	CompleteTaskContext(ctx context.Context, id int64) error
+}
+
 type Service struct {
 	Name    string
 	storage Storage
@@ -93,6 +97,27 @@ func (s *Service) UpdateTaskStatus(id int64, status string) error {
 
 	if err := s.storage.UpdateStatus(id, status); err != nil {
 		return fmt.Errorf("update task %d status: %w", id, err)
+	}
+
+	return nil
+}
+
+func (s *Service) CompleteTaskContext(ctx context.Context, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if id <= 0 {
+		return fmt.Errorf("complete task: invalid ID %d", id)
+	}
+
+	storage, ok := s.storage.(TaskCompletionStorage)
+	if !ok {
+		return fmt.Errorf("complete task %d: storage does not support atomic completion", id)
+	}
+
+	if err := storage.CompleteTaskContext(ctx, id); err != nil {
+		return fmt.Errorf("complete task %d: %w", id, err)
 	}
 
 	return nil

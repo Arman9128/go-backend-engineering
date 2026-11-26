@@ -23,6 +23,10 @@ type ContextTaskService interface {
 	GetTaskByIDContext(ctx context.Context, id int64) (task.Task, error)
 }
 
+type TaskCompletionService interface {
+	CompleteTaskContext(ctx context.Context, id int64) error
+}
+
 type TaskProcessor struct {
 	taskService TaskService
 }
@@ -67,6 +71,10 @@ func (p *TaskProcessor) Process(ctx context.Context, message queue.Message) erro
 		return fmt.Errorf("task name cannot be empty")
 	}
 
+	if event.Status != task.StatusPending {
+		return fmt.Errorf("task.created event has invalid initial status %q", event.Status)
+	}
+
 	if event.CreatedAt.IsZero() {
 		return fmt.Errorf("task creation time cannot be zero")
 	}
@@ -91,6 +99,15 @@ func (p *TaskProcessor) Process(ctx context.Context, message queue.Message) erro
 		!foundTask.CreatedAt.Equal(event.CreatedAt) ||
 		!slices.Equal(foundTask.Tags, event.Tags) {
 		return fmt.Errorf("task data does not match event %d", message.EventID)
+	}
+
+	completionService, ok := p.taskService.(TaskCompletionService)
+	if !ok {
+		return fmt.Errorf("complete task %d: task service does not support completion", event.ID)
+	}
+
+	if err := completionService.CompleteTaskContext(ctx, event.ID); err != nil {
+		return fmt.Errorf("complete task %d for event %d: %w", event.ID, message.EventID, err)
 	}
 
 	return nil

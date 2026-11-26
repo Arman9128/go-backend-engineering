@@ -3,8 +3,10 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/Arman9128/go-backend-engineering/internal/config"
@@ -105,6 +107,168 @@ func TestPostgresStorageSaveAndUpdateStatus(t *testing.T) {
 
 	if updatedStatus != task.StatusCompleted {
 		t.Errorf("expected status %q, got %q", task.StatusCompleted, updatedStatus)
+	}
+}
+
+func TestPostgresStorageCompleteTaskContext(t *testing.T) {
+	if os.Getenv("POSTGRES_INTEGRATION") != "1" {
+		t.Skip("PostgreSQL integration test is disabled")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	db, err := database.NewPostgresDB(cfg)
+	if err != nil {
+		t.Fatalf("connect to PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	storage := NewPostgresStorage(db)
+
+	taskData := &task.Task{
+		Name:   "complete-task-integration-test",
+		Status: task.StatusPending,
+	}
+
+	if err := storage.Save(taskData); err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	defer func() {
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM outbox_events WHERE aggregate_type = $1 AND aggregate_id = $2",
+			"task", taskData.ID,
+		); err != nil {
+			t.Errorf("cleanup outbox event: %v", err)
+		}
+
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM tasks WHERE id = $1", taskData.ID,
+		); err != nil {
+			t.Errorf("cleanup task: %v", err)
+		}
+	}()
+
+	if err := storage.CompleteTaskContext(ctx, taskData.ID); err != nil {
+		t.Fatalf("complete pending task: %v", err)
+	}
+
+	foundTask, err := storage.GetByIDContext(ctx, taskData.ID)
+	if err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if foundTask.Status != task.StatusCompleted {
+		t.Fatalf("task status = %q, want %q", foundTask.Status, task.StatusCompleted)
+	}
+
+	if err := storage.CompleteTaskContext(ctx, taskData.ID); err != nil {
+		t.Fatalf("complete already completed task: %v", err)
+	}
+
+	if err := storage.UpdateStatus(taskData.ID, task.StatusProcessing); err != nil {
+		t.Fatalf("set processing status: %v", err)
+	}
+
+	err = storage.CompleteTaskContext(ctx, taskData.ID)
+	if !errors.Is(err, task.ErrInvalidTransition) {
+		t.Fatalf("complete processing task error = %v, want ErrInvalidTransition", err)
+	}
+
+	err = storage.CompleteTaskContext(ctx, 9223372036854775807)
+	if !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("complete missing task error = %v, want ErrNotFound", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	err = storage.CompleteTaskContext(canceledCtx, taskData.ID)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("complete task with canceled context error = %v, want context.Canceled", err)
+	}
+}
+
+func TestPostgresStorageCompleteTaskContextConcurrent(t *testing.T) {
+	if os.Getenv("POSTGRES_INTEGRATION") != "1" {
+		t.Skip("PostgreSQL integration test is disabled")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	db, err := database.NewPostgresDB(cfg)
+	if err != nil {
+		t.Fatalf("connect to PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	storage := NewPostgresStorage(db)
+
+	taskData := &task.Task{
+		Name:   "concurrent-complete-task-integration-test",
+		Status: task.StatusPending,
+	}
+
+	if err := storage.Save(taskData); err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	defer func() {
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM outbox_events WHERE aggregate_type = $1 AND aggregate_id = $2",
+			"task", taskData.ID,
+		); err != nil {
+			t.Errorf("cleanup outbox event: %v", err)
+		}
+
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM tasks WHERE id = $1", taskData.ID,
+		); err != nil {
+			t.Errorf("cleanup task: %v", err)
+		}
+	}()
+
+	const concurrentCalls = 20
+
+	start := make(chan struct{})
+	errs := make(chan error, concurrentCalls)
+
+	var wg sync.WaitGroup
+	wg.Add(concurrentCalls)
+
+	for i := 0; i < concurrentCalls; i++ {
+		go func() {
+			defer wg.Done()
+
+			<-start
+			errs <- storage.CompleteTaskContext(ctx, taskData.ID)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent CompleteTaskContext() error = %v, want nil", err)
+		}
+	}
+
+	foundTask, err := storage.GetByIDContext(ctx, taskData.ID)
+	if err != nil {
+		t.Fatalf("get concurrently completed task: %v", err)
+	}
+
+	if foundTask.Status != task.StatusCompleted {
+		t.Fatalf("task status = %q, want %q", foundTask.Status, task.StatusCompleted)
 	}
 }
 

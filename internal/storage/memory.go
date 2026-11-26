@@ -87,3 +87,38 @@ func (m *MemoryStorage) UpdateStatus(id int64, status string) error {
 
 	return nil
 }
+
+func (m *MemoryStorage) CompleteTaskContext(ctx context.Context, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	taskData, exists := m.tasks[id]
+	if !exists {
+		return fmt.Errorf("complete task %d: %w", id, task.ErrNotFound)
+	}
+
+	if taskData.Status == task.StatusCompleted {
+		return nil
+	}
+
+	if taskData.Status != task.StatusPending {
+		return fmt.Errorf(
+			"complete task %d from status %q: %w",
+			id,
+			taskData.Status,
+			task.ErrInvalidTransition,
+		)
+	}
+
+	taskData.Status = task.StatusCompleted
+
+	return nil
+}
